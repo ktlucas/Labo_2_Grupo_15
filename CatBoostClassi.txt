@@ -1,0 +1,69 @@
+from catboost import CatBoostClassifier, Pool
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import cohen_kappa_score
+import numpy as np
+
+# 1. Definir explícitamente las variables categóricas
+# Usamos la lista limpia que definimos anteriormente (Sin PetID, Name, etc.)
+categorical_cols = [
+    'Type', 'Breed1', 'Breed2', 'Gender', 'Color1', 'Color2', 'Color3', 
+    'Vaccinated', 'Dewormed', 'Sterilized', 'Health', 'State', 'SizeCategory', 
+    'Is_Purebred'
+]
+
+# Convertir a string/category es buena práctica, aunque CatBoost es flexible
+for col in categorical_cols:
+    X_train[col] = X_train[col].astype('category')
+    X_test[col] = X_test[col].astype('category')
+
+# 2. Configurar la Validación Cruzada
+N_SPLITS = 5
+folds = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
+
+oof_preds_cb = np.zeros((len(X_train), 5))
+test_preds_cb = np.zeros((len(X_test), 5))
+
+# 3. Bucle de Entrenamiento
+print("Iniciando entrenamiento CatBoost con 5-Fold CV...")
+
+for fold_, (trn_idx, val_idx) in enumerate(folds.split(X_train, y_train)):
+    print(f"\n--- Fold {fold_ + 1} ---")
+    
+    X_tr, y_tr = X_train.iloc[trn_idx], y_train.iloc[trn_idx]
+    X_val, y_val = X_train.iloc[val_idx], y_train.iloc[val_idx]
+    
+    # Crear objetos Pool (el equivalente a lgb.Dataset)
+    trn_pool = Pool(X_tr, label=y_tr, cat_features=categorical_cols)
+    val_pool = Pool(X_val, label=y_val, cat_features=categorical_cols)
+    
+    # Inicializar el modelo Multiclase
+    model = CatBoostClassifier(
+        iterations=1000,
+        learning_rate=0.05,
+        depth=6,
+        loss_function='MultiClass',  # Función de pérdida para multiclase
+        eval_metric='TotalF1',       # CatBoost no tiene Kappa nativo para early stopping multiclase, F1 es un buen proxy
+        random_seed=42,
+        od_type='Iter',              # Tipo de Overfitting Detector (Early Stopping)
+        od_wait=50,                  # Rondas de paciencia
+        verbose=100                  # Imprimir progreso cada 100 iteraciones
+    )
+    
+    # Entrenar
+    model.fit(
+        trn_pool,
+        eval_set=val_pool,
+        use_best_model=True
+    )
+    
+    # Predecir probabilidades (Out-Of-Fold)
+    oof_preds_cb[val_idx] = model.predict_proba(X_val)
+    
+    # Predecir probabilidades en Test Set (Promediando)
+    test_preds_cb += model.predict_proba(X_test) / N_SPLITS
+
+# 4. Calcular Score Final (QWK)
+oof_predictions_classes_cb = oof_preds_cb.argmax(axis=1)
+kappa_cv_cb = cohen_kappa_score(y_train, oof_predictions_classes_cb, weights='quadratic')
+
+print(f"\nScore Kappa Final de Validación Cruzada (CatBoost): {kappa_cv_cb:.4f}")
